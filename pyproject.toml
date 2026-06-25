@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "agentctx"
-version = "0.3.0"
+version = "0.7.0"
 description = "kubectx-like CLI for switching Codex auth profiles"
 authors = ["Nikolay Baryshnikov <root@k0d.ru>"]
 packages = [

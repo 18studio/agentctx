@@ -14,10 +14,12 @@ USAGE = """Manage and switch between Codex auth profiles.
 USAGE:
   agentctx                       : list the profiles
   agentctx <NAME>                : switch to profile <NAME>
+  agentctx login                 : run Codex browser login and save JWT email profile
   agentctx -                     : switch to the previous profile
   agentctx -c, --current         : show the current profile name
   agentctx <NEW_NAME>=<NAME>     : rename profile <NAME> to <NEW_NAME>
-  agentctx <NEW_NAME>=.          : save or rename current active auth to <NEW_NAME>
+  agentctx =.                    : save or rename current active auth using JWT email
+  agentctx <EMAIL>=.             : same, but validate <EMAIL> matches JWT email
   agentctx -d <NAME> [<NAME...>] : delete profile <NAME> ('.' for current profile)
                                   (this command won't delete the active auth file
                                   that is used by Codex)
@@ -40,7 +42,7 @@ def _print_profile_list() -> int:
 
 
 def _maybe_interactive_select() -> Optional[str]:
-    if not sys.stdout.isatty():
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
         return None
     if shutil.which("fzf") is None:
         return None
@@ -77,17 +79,40 @@ def _list_or_select() -> int:
 
 def _handle_rename_or_save(spec: str) -> int:
     new_name, old_name = spec.split("=", 1)
-    if not new_name or not old_name:
+    if not old_name or (not new_name and old_name != "."):
         raise AgentctxError("invalid rename syntax: {0}".format(spec))
     if old_name == ".":
-        outcome = profiles.save_or_rename_current(new_name)
+        outcome, profile_name = profiles.save_or_rename_current_from_jwt_email(new_name or None)
         if outcome == "saved":
-            print('Saved current Codex auth as profile "{0}".'.format(new_name))
+            print('Saved current Codex auth as profile "{0}".'.format(profile_name))
         else:
-            print('Current profile renamed to "{0}".'.format(new_name))
+            print('Updated Codex auth profile "{0}".'.format(profile_name))
         return 0
     profiles.rename_profile(old_name, new_name)
     print('Profile "{0}" renamed to "{1}".'.format(old_name, new_name))
+    return 0
+
+
+def _handle_login(args: Sequence[str]) -> int:
+    if args:
+        raise UsageError("error: login does not accept arguments")
+    codex = shutil.which("codex")
+    if codex is None:
+        raise AgentctxError("codex executable not found in PATH")
+
+    previous = profiles.get_current_marker()
+    profiles.prepare_login_auth()
+    proc = subprocess.run([codex, "login"])
+    if proc.returncode != 0:
+        if previous:
+            profiles.switch_profile(previous)
+        raise AgentctxError("codex login failed with exit code {0}".format(proc.returncode))
+
+    outcome, profile_name = profiles.save_login_auth_from_jwt_email()
+    if outcome == "saved":
+        print('Logged in and saved Codex auth as profile "{0}".'.format(profile_name))
+    else:
+        print('Logged in and updated Codex auth profile "{0}".'.format(profile_name))
     return 0
 
 
@@ -118,6 +143,9 @@ def run(argv: Sequence[str]) -> int:
         profiles.clear_current()
         print("Unsetting current profile.", file=sys.stderr)
         return 0
+
+    if args[0] == "login":
+        return _handle_login(args[1:])
 
     if args[0] == "-d":
         if len(args) == 1:

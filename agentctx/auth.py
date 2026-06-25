@@ -1,5 +1,7 @@
 """Safe operations for Codex auth.json files."""
 
+import base64
+import binascii
 import contextlib
 import datetime as _dt
 import hashlib
@@ -7,7 +9,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Any, Iterator, List, Optional
 
 from agentctx import paths
 from agentctx.errors import InvalidAuthJson, LockError, UnsafeAuthFile
@@ -44,7 +46,10 @@ def init_storage() -> None:
 
 def reject_unsafe_existing_file(path: Path) -> None:
     if path.is_symlink():
-        raise UnsafeAuthFile("refusing to use symlink: {0}".format(path))
+        target = path.resolve()
+        if not target.is_file():
+            raise UnsafeAuthFile("symlink target is not a regular file: {0}".format(path))
+        return
     if not path.exists():
         raise FileNotFoundError("file not found: {0}".format(path))
     if not path.is_file():
@@ -52,7 +57,9 @@ def reject_unsafe_existing_file(path: Path) -> None:
 
 
 def reject_unsafe_target(path: Path) -> None:
-    if path.exists() or path.is_symlink():
+    if path.is_symlink():
+        raise UnsafeAuthFile("refusing to overwrite symlink: {0}".format(path))
+    if path.exists():
         reject_unsafe_existing_file(path)
 
 
@@ -66,8 +73,55 @@ def read_valid_auth_bytes(path: Path) -> bytes:
     return data
 
 
+def read_valid_auth_json(path: Path) -> Any:
+    return json.loads(read_valid_auth_bytes(path).decode("utf-8"))
+
+
 def validate_auth_json(path: Path) -> None:
     read_valid_auth_bytes(path)
+
+
+def _jwt_payload(token: str) -> Optional[dict]:
+    parts = token.split(".")
+    if len(parts) != 3 or not parts[1]:
+        return None
+    payload = parts[1]
+    payload += "=" * (-len(payload) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(payload.encode("ascii"))
+        decoded = json.loads(raw.decode("utf-8"))
+    except (UnicodeEncodeError, binascii.Error, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return decoded if isinstance(decoded, dict) else None
+
+
+def _collect_jwt_candidates(value: Any, key: str = "") -> List[str]:
+    preferred_keys = {"id_token", "jwt", "token", "access_token"}
+    if isinstance(value, str):
+        return [value] if key in preferred_keys or value.count(".") == 2 else []
+    if isinstance(value, dict):
+        preferred = []  # type: List[str]
+        rest = []  # type: List[str]
+        for child_key, child_value in value.items():
+            target = preferred if child_key in preferred_keys else rest
+            target.extend(_collect_jwt_candidates(child_value, str(child_key)))
+        return preferred + rest
+    if isinstance(value, list):
+        result = []  # type: List[str]
+        for item in value:
+            result.extend(_collect_jwt_candidates(item, key))
+        return result
+    return []
+
+
+def email_from_auth_jwt(path: Path) -> str:
+    data = read_valid_auth_json(path)
+    for token in _collect_jwt_candidates(data):
+        payload = _jwt_payload(token)
+        email = payload.get("email") if payload else None
+        if isinstance(email, str) and email.strip():
+            return email.strip().lower()
+    raise InvalidAuthJson("JWT email not found in {0}".format(path))
 
 
 def sha256_file(path: Path) -> str:
